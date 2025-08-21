@@ -173,6 +173,7 @@ router.put("/transactions/:transactionId", async (req, res) => {
 });
 
 // POST /vendors/:vendorId/transactions
+// POST /vendors/:vendorId/transactions
 router.post("/:vendorId/transactions", async (req, res) => {
   const vendorId = parseInt(req.params.vendorId, 10);
   const { amount, note, transaction_date } = req.body;
@@ -190,7 +191,7 @@ router.post("/:vendorId/transactions", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // lock the vendor row to avoid race conditions
+    // lock the vendor row
     const vendorQ = await client.query(
       `SELECT vendor_id, total_amount, pending_amount
        FROM vendors
@@ -206,32 +207,33 @@ router.post("/:vendorId/transactions", async (req, res) => {
 
     const vendor = vendorQ.rows[0];
 
-    // Parse numeric values (DB numeric may come as string)
     const total = parseFloat(vendor.total_amount);
-    const currentPending = vendor.pending_amount !== null ? parseFloat(vendor.pending_amount) : total;
+    const currentPending = vendor.pending_amount !== null
+      ? parseFloat(vendor.pending_amount)
+      : total;
 
-    // compute new pending (allow overpayment — pending becomes 0)
+    // compute new pending
     let newPending = currentPending - amt;
     let status;
     if (newPending <= 0) {
       newPending = 0;
       status = "Paid";
-    } else if (Math.abs(newPending - total) < Number.EPSILON) {
+    } else if (newPending === total) {
       status = "Pending";
     } else {
       status = "Partial";
     }
 
-    // Insert transaction (use provided date if valid, else NOW())
+    // Insert transaction
     const txInsert = await client.query(
       `INSERT INTO transactions
-         (vendor_id, transaction_date, amount, note, status)
-       VALUES ($1, COALESCE($2, NOW()), $3, $4, $5)
+         (vendor_id, transaction_date, amount, note)
+       VALUES ($1, COALESCE($2, NOW()), $3, $4)
        RETURNING *`,
-      [vendorId, transaction_date || null, amt, note || null, status]
+      [vendorId, transaction_date || null, amt, note || null]
     );
 
-    // Update vendor pending_amount (and optionally status if you store it)
+    // Update vendor pending_amount
     const vendorUpdate = await client.query(
       `UPDATE vendors
          SET pending_amount = $1
@@ -246,8 +248,8 @@ router.post("/:vendorId/transactions", async (req, res) => {
       message: "Transaction added",
       transaction: txInsert.rows[0],
       vendor: vendorUpdate.rows[0],
-      status, // current status after this transaction
-      overpayment: amt > currentPending ? (amt - currentPending) : 0
+      status, // computed status
+      overpayment: amt > currentPending ? amt - currentPending : 0
     });
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
@@ -257,6 +259,7 @@ router.post("/:vendorId/transactions", async (req, res) => {
     client.release();
   }
 });
+
 // DELETE /vendors/:vendorId/transactions/:transactionId
 router.delete("/:vendorId/transactions/:transactionId", async (req, res) => {
   const vendorId = parseInt(req.params.vendorId, 10);
